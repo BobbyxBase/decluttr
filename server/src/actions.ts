@@ -1,4 +1,7 @@
-import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
+import { z } from "zod";
+import { defineAction, type ActionCtx, type ActionsModule } from "./ctx";
+
+type Ctx = ActionCtx;
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
@@ -475,7 +478,7 @@ async function queryNftLogWindow(owner: string, cursor: number, startBlock: numb
 }
 
 async function verifyStoredNftCandidates(ctx: Ctx, owner: string): Promise<IndexedNft[]> {
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   const rows = await db.select().from(schema.nftHoldings).where(eq(schema.nftHoldings.walletAddress, owner)).orderBy(desc(schema.nftHoldings.lastSeenBlock)).limit(120);
   const metaCache = new Map<string, { name: string; symbol: string | null }>();
   const holdings: IndexedNft[] = [];
@@ -510,7 +513,7 @@ async function verifyStoredNftCandidates(ctx: Ctx, owner: string): Promise<Index
 }
 
 async function scanOnchainNfts(ctx: Ctx, owner: string): Promise<OnchainNftScanResult> {
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   let state = (await db.select().from(schema.nftScanState).where(eq(schema.nftScanState.walletAddress, owner)).limit(1))[0];
   let tipBlock: number | null = await latestBlock().catch(() => null);
   if (!state) {
@@ -580,7 +583,7 @@ async function queryLogsBackward(filter: Record<string, unknown>, cursor: number
 }
 
 async function ensureSettings(ctx: Ctx) {
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   let row = (await db.select().from(schema.appSettings).where(eq(schema.appSettings.id, 1)).limit(1))[0];
   if (!row) {
     const now = new Date();
@@ -616,7 +619,7 @@ async function refreshUnknownPrice(address: string): Promise<{ usd: number; asOf
 
 async function getTokenMeta(ctx: Ctx, addressValue: string, knownPrices?: Map<string, { usd: number; asOf: Date }>, allowPriceFetch = true): Promise<TokenMeta> {
   const address = addressValue.toLowerCase();
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   const cached = (await db.select().from(schema.tokenCache).where(eq(schema.tokenCache.tokenAddress, address)).limit(1))[0];
   const curated = CURATED[address];
   let name = curated?.name ?? cached?.name ?? "Unknown token";
@@ -666,7 +669,7 @@ async function recordApproval(ctx: Ctx, owner: string, log: RpcLog, live: boolea
   const spender = `0x${spenderTopic.slice(-40)}`.toLowerCase();
   const block = Number(parseHex(log.blockNumber));
   const allowance = await currentAllowance(owner, token, spender).catch(() => parseHex(log.data));
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   const existing = (await db.select().from(schema.approvalPairs).where(and(eq(schema.approvalPairs.walletAddress, owner), eq(schema.approvalPairs.tokenAddress, token), eq(schema.approvalPairs.spenderAddress, spender))).limit(1))[0];
   await db.insert(schema.approvalPairs).values({ walletAddress: owner, tokenAddress: token, spenderAddress: spender, firstSeenBlock: existing?.firstSeenBlock ?? block, lastSeenBlock: Math.max(existing?.lastSeenBlock ?? 0, block), currentAllowance: allowance.toString(), updatedAt: new Date() })
     .onConflictDoUpdate({ target: [schema.approvalPairs.walletAddress, schema.approvalPairs.tokenAddress, schema.approvalPairs.spenderAddress], set: { lastSeenBlock: Math.max(existing?.lastSeenBlock ?? 0, block), currentAllowance: allowance.toString(), updatedAt: new Date() } });
@@ -690,7 +693,7 @@ async function recordTransfer(ctx: Ctx, owner: string, log: RpcLog, live: boolea
   if (from !== owner && to !== owner) return;
   const block = Number(parseHex(log.blockNumber));
   const eventKey = `${log.transactionHash}:${log.logIndex}:transfer`;
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   const inserted = await db.insert(schema.processedEvents).values({ eventKey, walletAddress: owner, blockNumber: block, processedAt: new Date() }).onConflictDoNothing().returning({ eventKey: schema.processedEvents.eventKey });
   if (!inserted[0]) return;
   const token = log.address.toLowerCase();
@@ -717,7 +720,7 @@ async function recordTransfer(ctx: Ctx, owner: string, log: RpcLog, live: boolea
 }
 
 async function scanForward(ctx: Ctx, owner: string): Promise<number> {
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
   if (!state) return 0;
   const latest = await latestBlock();
@@ -735,7 +738,7 @@ async function scanForward(ctx: Ctx, owner: string): Promise<number> {
 }
 
 async function backfillApprovals(ctx: Ctx, owner: string): Promise<void> {
-  const db = ctx.db<typeof schema>();
+  const db = ctx.db;
   const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
   if (!state || state.approvalBackfillCursor <= 0) return;
   const page = await queryLogsBackward({ topics: [APPROVAL_TOPIC, padAddress(owner)] }, state.approvalBackfillCursor);
@@ -776,7 +779,7 @@ async function onchainNftResponse(ctx: Ctx, walletAddress: string): Promise<z.in
       : `Automatic history scan is checking Base blocks before ${scanned.nextBlock.toLocaleString()}, stopping at this wallet’s earliest transaction or token transfer near block ${scanned.startBlock.toLocaleString()}. Ownership is verified on-chain.`;
     return { nfts, source_status: "onchain", message, scan_cursor: scanned.nextBlock, scan_start: scanned.startBlock, scan_tip: scanned.tipBlock, scan_complete: scanned.complete, as_of: new Date().toISOString() };
   } catch {
-    const db = ctx.db<typeof schema>();
+    const db = ctx.db;
     const state = (await db.select().from(schema.nftScanState).where(eq(schema.nftScanState.walletAddress, walletAddress)).limit(1))[0];
     const holdings = await verifyStoredNftCandidates(ctx, walletAddress);
     const nfts = mapNftItems(holdings);
@@ -849,7 +852,7 @@ export const Actions = {
     request: z.object({}),
     response: z.object({ wallets: z.array(walletItem), total_usd: z.number(), unpriced_tokens: z.number(), hidden_count: z.number(), settings: settingsResponse, alerts: z.array(alertItem), as_of: z.string(), source_status: z.string() }),
     async handler(ctx): Promise<{ wallets: z.infer<typeof walletItem>[]; total_usd: number; unpriced_tokens: number; hidden_count: number; settings: z.infer<typeof settingsResponse>; alerts: z.infer<typeof alertItem>[]; as_of: string; source_status: string }> {
-      const db = ctx.db<typeof schema>();
+      const db = ctx.db;
       const settings = await ensureSettings(ctx);
       const wallets = await db.select().from(schema.watchedWallets).orderBy(asc(schema.watchedWallets.id));
       const hidden = await db.select().from(schema.hiddenTokens);
@@ -932,17 +935,15 @@ export const Actions = {
     response: z.object({ id: z.number(), address: z.string() }),
     async handler(ctx, args) {
       const address = normalizeAddress(args.address);
-      const db = ctx.db<typeof schema>();
+      const db = ctx.db;
       const existing = (await db.select().from(schema.watchedWallets).where(eq(schema.watchedWallets.address, address)).limit(1))[0];
       if (existing) return { id: existing.id, address };
       const latest = await latestBlock();
       const inserted = await db.insert(schema.watchedWallets).values({ address, label: args.label?.trim() || null, addedAt: new Date() }).returning({ id: schema.watchedWallets.id });
       const row = inserted[0];
       if (!row) throw new Error("Could not add wallet.");
-      await db.batch([
-        db.insert(schema.scanState).values({ walletAddress: address, latestScannedBlock: Math.max(0, latest - 50), approvalBackfillCursor: latest, activityBackfillCursor: latest, updatedAt: new Date() }),
-        db.insert(schema.nftScanState).values({ walletAddress: address, nextBlock: latest, complete: false, updatedAt: new Date() }),
-      ]);
+            await db.insert(schema.scanState).values({ walletAddress: address, latestScannedBlock: Math.max(0, latest - 50), approvalBackfillCursor: latest, activityBackfillCursor: latest, updatedAt: new Date() });
+      await db.insert(schema.nftScanState).values({ walletAddress: address, nextBlock: latest, complete: false, updatedAt: new Date() });
       ctx.invalidateQueries();
       return { id: row.id, address };
     },
@@ -953,18 +954,16 @@ export const Actions = {
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args): Promise<{ ok: true }> {
       const address = normalizeAddress(args.address);
-      const db = ctx.db<typeof schema>();
-      await db.batch([
-        db.delete(schema.watchedWallets).where(eq(schema.watchedWallets.address, address)),
-        db.delete(schema.hiddenTokens).where(eq(schema.hiddenTokens.walletAddress, address)),
-        db.delete(schema.approvalPairs).where(eq(schema.approvalPairs.walletAddress, address)),
-        db.delete(schema.scanState).where(eq(schema.scanState.walletAddress, address)),
-        db.delete(schema.tokenActivity).where(eq(schema.tokenActivity.walletAddress, address)),
-        db.delete(schema.nftHoldings).where(eq(schema.nftHoldings.walletAddress, address)),
-        db.delete(schema.nftScanState).where(eq(schema.nftScanState.walletAddress, address)),
-        db.delete(schema.processedEvents).where(eq(schema.processedEvents.walletAddress, address)),
-        db.delete(schema.alerts).where(eq(schema.alerts.walletAddress, address)),
-      ]);
+      const db = ctx.db;
+            await db.delete(schema.watchedWallets).where(eq(schema.watchedWallets.address, address));
+      await db.delete(schema.hiddenTokens).where(eq(schema.hiddenTokens.walletAddress, address));
+      await db.delete(schema.approvalPairs).where(eq(schema.approvalPairs.walletAddress, address));
+      await db.delete(schema.scanState).where(eq(schema.scanState.walletAddress, address));
+      await db.delete(schema.tokenActivity).where(eq(schema.tokenActivity.walletAddress, address));
+      await db.delete(schema.nftHoldings).where(eq(schema.nftHoldings.walletAddress, address));
+      await db.delete(schema.nftScanState).where(eq(schema.nftScanState.walletAddress, address));
+      await db.delete(schema.processedEvents).where(eq(schema.processedEvents.walletAddress, address));
+      await db.delete(schema.alerts).where(eq(schema.alerts.walletAddress, address));
       ctx.invalidateQueries();
       return { ok: true };
     },
@@ -976,7 +975,7 @@ export const Actions = {
     async handler(ctx, args): Promise<{ ok: true }> {
       const wallet = normalizeAddress(args.wallet_address);
       const token = normalizeAddress(args.token_address);
-      const db = ctx.db<typeof schema>();
+      const db = ctx.db;
       if (args.hidden) await db.insert(schema.hiddenTokens).values({ walletAddress: wallet, tokenAddress: token, hiddenAt: new Date() }).onConflictDoNothing();
       else await db.delete(schema.hiddenTokens).where(and(eq(schema.hiddenTokens.walletAddress, wallet), eq(schema.hiddenTokens.tokenAddress, token)));
       ctx.invalidateQueries();
@@ -988,7 +987,7 @@ export const Actions = {
     request: z.object({ approval_threshold_usd: z.number().min(0).max(1_000_000_000), outflow_threshold_usd: z.number().min(0).max(1_000_000_000), watch_enabled: z.boolean() }),
     response: settingsResponse,
     async handler(ctx, args): Promise<z.infer<typeof settingsResponse>> {
-      const db = ctx.db<typeof schema>();
+      const db = ctx.db;
       await db.insert(schema.appSettings).values({ id: 1, approvalThresholdUsd: args.approval_threshold_usd, outflowThresholdUsd: args.outflow_threshold_usd, watchEnabled: args.watch_enabled, updatedAt: new Date() }).onConflictDoUpdate({ target: schema.appSettings.id, set: { approvalThresholdUsd: args.approval_threshold_usd, outflowThresholdUsd: args.outflow_threshold_usd, watchEnabled: args.watch_enabled, updatedAt: new Date() } });
       ctx.invalidateQueries();
       return args;
@@ -999,7 +998,7 @@ export const Actions = {
     request: z.object({ refresh: z.boolean().default(true) }),
     response: z.object({ approvals: z.array(z.object({ id: z.number(), wallet_address: z.string(), token_address: z.string(), token_symbol: z.string(), spender_address: z.string(), allowance_raw: z.string(), allowance_display: z.string(), usd_value: z.number().nullable(), unlimited: z.boolean(), last_seen_block: z.number() })), coverage: z.array(z.object({ wallet_address: z.string(), backfill_cursor: z.number(), latest_scanned_block: z.number(), complete: z.boolean(), error: z.string().nullable() })), as_of: z.string() }),
     async handler(ctx, args) {
-      const db = ctx.db<typeof schema>();
+      const db = ctx.db;
       const wallets = await db.select().from(schema.watchedWallets).orderBy(asc(schema.watchedWallets.id));
       const coverage: { wallet_address: string; backfill_cursor: number; latest_scanned_block: number; complete: boolean; error: string | null }[] = [];
       if (args.refresh) {
@@ -1032,7 +1031,7 @@ export const Actions = {
     request: z.object({}),
     response: z.object({ alerts: z.array(alertItem), checked_at: z.string(), errors: z.array(z.string()) }),
     async handler(ctx) {
-      const db = ctx.db<typeof schema>();
+      const db = ctx.db;
       const settings = await ensureSettings(ctx);
       if (!settings.watchEnabled) return { alerts: [], checked_at: new Date().toISOString(), errors: [] };
       const wallets = await db.select().from(schema.watchedWallets);
@@ -1050,7 +1049,7 @@ export const Actions = {
     request: z.object({}),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx): Promise<{ ok: true }> {
-      const db = ctx.db<typeof schema>();
+      const db = ctx.db;
       await db.update(schema.alerts).set({ readAt: new Date() }).where(sql`${schema.alerts.readAt} IS NULL`);
       ctx.invalidateQueries();
       return { ok: true };
