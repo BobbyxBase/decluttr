@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { useAppKitAccount, useAppKitNetwork, useAppKitProvider } from "@reown/appkit/react";
 import { useAppKitWallet } from "@reown/appkit-wallet-button/react";
 import { api, type ApiResponse } from "./api";
@@ -422,11 +421,11 @@ export function App() {
     saveSettings(enabled);
   }
 
-  if (overview.isPending) return <div className="app-shell loading-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><div className="loading-line" /><p>Reading Base…</p></div>;
-  if (overview.error || !overview.data) return <div className="app-shell loading-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><div className="empty-mark danger-mark">!</div><h1>Couldn’t load wallet data</h1><p>The connection to DeCluttr timed out. Your saved wallets are still here.</p><button className="primary-button" onClick={() => overview.refetch()}>Try again</button></div>;
+  if (overview.isPending) return <div className="app-shell loading-shell"><div className="safe-area-top-scrim" style={{ backgroundColor: "var(--bg)" }} /><div className="loading-line" /><p>Reading Base…</p></div>;
+  if (overview.error || !overview.data) return <div className="app-shell loading-shell"><div className="safe-area-top-scrim" style={{ backgroundColor: "var(--bg)" }} /><div className="empty-mark danger-mark">!</div><h1>Couldn’t load wallet data</h1><p>The connection to DeCluttr timed out. Your saved wallets are still here.</p><button className="primary-button" onClick={() => overview.refetch()}>Try again</button></div>;
 
   return <div className="app-shell">
-    <SafeAreaTopScrim backgroundColor="var(--bg)" />
+    <div className="safe-area-top-scrim" style={{ backgroundColor: "var(--bg)" }} />
     {toast && <div className="toast" role="status"><StatusDot tone="warn" /><span>{toast}</span></div>}
     <main className="main-content">
       <header className="content-head">
