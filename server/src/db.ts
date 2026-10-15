@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { drizzle } from "drizzle-orm/bun-sqlite";
@@ -14,6 +15,7 @@ const MIGRATIONS: string[] = [
 ];
 
 export function openDatabase(dataDir: string): { db: Db; sqlite: Database } {
+  mkdirSync(dataDir, { recursive: true });
   const sqlite = new Database(join(dataDir, "decluttr.db"), { create: true });
   sqlite.exec("PRAGMA journal_mode = WAL;");
   const db = drizzle(sqlite, { schema });
