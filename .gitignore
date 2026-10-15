@@ -1,14 +1,6 @@
 node_modules/
-dist/
-dist-cvm/
+client/dist/
 *.tsbuildinfo
-*.db
-*.db-journal
+data/
 .env
 .env.*
-.space-build/
-.space-build-cvm/
-.harness/
-.bun-cache/
-blobs/
-audits/

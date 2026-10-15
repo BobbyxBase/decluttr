@@ -2,22 +2,7 @@
 
 Web3 wallet management on **Base** — a phone-first dashboard for watching wallets, auditing token approvals, cleaning up dust, browsing NFTs, and catching security-relevant changes.
 
-Built by Robert Collier. Live MVP: multi-wallet watchlist, live Base mainnet balances with USD net worth, approval scanning with one-click revokes (`approve(spender, 0)`), dust/spam hiding, NFT gallery with tap-to-open detail views and floor-price estimates, watch-mode alerts, and WalletConnect QR pairing.
-
-## Stack
-
-- **Client:** React 19 + TypeScript, wagmi/viem, Reown AppKit (WalletConnect), TanStack Query, Tailwind
-- **Server:** Bun + TypeScript, Drizzle ORM (SQLite)
-- **Chain:** Base (8453)
-
-## Run it
-
-```bash
-bun install
-bun run build
-```
-
-> Note: this project was built on the Hatch artifact runtime and references `@hatch/space-sdk` via a local file path in `package.json`. To run it standalone, replace that dependency with your own server wiring — the `server/src/actions.ts` handlers map 1:1 to API routes, and `client/src/api.ts` is the only client call site.
+Built by Robert Collier.
 
 ## Features
 
@@ -26,10 +11,68 @@ bun run build
 - **Approvals** — token approval scan with unlimited-allowance flagging and one-click revokes
 - **Cleanup** — dust & suspect-token review queue
 - **Watch** — 60-second watch-mode alerts on watched wallets
-- **Wallet connect** — WalletConnect QR pairing (Reown project ID in `client/src/wallet.ts`) with injected-provider fallback
+- **Wallet connect** — WalletConnect QR pairing (Reown) with injected-provider fallback
 
-## Roadmap
+## Stack
 
-- Safe multisig whitelist-change alerts (flagship security feature)
-- Public hosted beta for unmoderated testing
-- Base Builder Grants / Builder Rewards submission
+- **Client:** React 19 + TypeScript, wagmi/viem, Reown AppKit (WalletConnect), TanStack Query, Tailwind CSS v4
+- **Server:** Bun + TypeScript, Hono, Drizzle ORM (SQLite)
+- **Chain:** Base (8453)
+
+## Setup
+
+Prerequisites: [Bun](https://bun.sh) 1.3+.
+
+```bash
+git clone https://github.com/BobbyxBase/decluttr.git
+cd decluttr
+bun install
+bun run dev
+```
+
+Open http://localhost:3000. The server creates `./data/decluttr.db` (SQLite) and runs the Drizzle migrations automatically on first boot.
+
+To build the production client bundle:
+
+```bash
+bun run build   # emits client/dist/
+```
+
+Then `bun run dev` serves the built bundle (or run with `NODE_ENV=production`).
+
+Set `PORT` to change the listen port (default 3000).
+
+## Project layout
+
+```
+client/
+  src/           React app (App.tsx, api.ts, wallet.ts, theme.css)
+  index.html     HTML shell
+  build.mjs      Tailwind + Bun.build pipeline -> client/dist/
+server/
+  src/
+    index.ts     Hono server: POST /api/<action>, /blobs/*, static client
+    actions.ts   Business logic — one handler per action (ported verbatim)
+    ctx.ts       Standalone action context { db, blobs }
+    db.ts        SQLite open + migration runner
+    schema.ts    Drizzle schema
+drizzle/         SQL migrations (run automatically on boot)
+data/            SQLite db + cached NFT artwork (gitignored)
+```
+
+## API
+
+`POST /api/<actionName>` with a JSON body of the action's args, e.g.:
+
+```bash
+curl -X POST http://localhost:3000/api/getOverview \
+  -H 'content-type: application/json' -d '{}'
+```
+
+Actions: `getOverview`, `listNfts`, `listApprovals`, `addWallet`, `removeWallet`, `setTokenHidden`, `updateSettings`, `pollWatch`, `markAlertsRead`, `loadNftArtwork`.
+
+## Notes
+
+- This project was ported from a Hatch artifact build to run fully standalone — no Hatch runtime required.
+- The Reown project ID in `client/src/wallet.ts` is a public identifier by design; swap in your own if you fork.
+- Price data comes from CoinGecko's free API; NFT indexing uses Alchemy's public demo endpoint with an on-chain transfer-scan fallback.
