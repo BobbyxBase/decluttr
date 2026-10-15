@@ -307,3 +307,11 @@ button:disabled { opacity: .55; cursor: wait; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* Standalone replacement for the SDK's SafeAreaTopScrim: reserves the
+   iOS/Android top safe-area inset so content never sits under the notch. */
+.safe-area-top-scrim {
+  flex: none;
+  height: env(safe-area-inset-top, 0px);
+  min-height: 0;
+}

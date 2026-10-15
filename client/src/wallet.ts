@@ -2,6 +2,9 @@ import { createAppKit } from "@reown/appkit/react";
 import { base, type AppKitNetwork } from "@reown/appkit/networks";
 import { WagmiAdapter } from "@reown/appkit-adapter-wagmi";
 
+// Reown (WalletConnect) project ID. This is a public identifier by design —
+// it is safe to ship in client code. To use your own, set it here or move it
+// to an env var (e.g. import.meta.env.VITE_REOWN_PROJECT_ID) and reference that.
 export const REOWN_PROJECT_ID = "806d94611956ad57b8549c9f23b8f9d0";
 export const BASE_NETWORK = base;
 
