@@ -871,7 +871,12 @@ async function blockscoutGet(path: string, params: Record<string, string>): Prom
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`https://base.blockscout.com/api/v2${path}?${qs}`, {
     signal: AbortSignal.timeout(15_000),
-    headers: { "user-agent": "DeCluttr/1.0" },
+    headers: {
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      "accept": "application/json, text/plain, */*",
+      "accept-language": "en-US,en;q=0.9",
+      "referer": "https://base.blockscout.com/",
+    },
   });
   if (!res.ok) throw new Error(`Blockscout HTTP ${res.status}`);
   return res.json();
