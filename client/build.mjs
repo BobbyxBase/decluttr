@@ -45,4 +45,7 @@ if (!result.success) {
 // 3. HTML shell
 await cp(fileURLToPath(new URL("./index.html", import.meta.url)), fileURLToPath(new URL("./dist/index.html", import.meta.url)));
 
+// 4. Static public assets (icons, favicons)
+await cp(fileURLToPath(new URL("./public/", import.meta.url)), fileURLToPath(new URL("./dist/", import.meta.url)), { recursive: true });
+
 console.log("client built -> client/dist");
