@@ -47,9 +47,14 @@ Then `bun run dev` serves the built bundle (or run with `NODE_ENV=production`).
 Set `PORT` to change the listen port (default 3000).
 
 Set `BASE_RPC_URL` to your own Base JSON-RPC HTTPS endpoint (e.g. Alchemy or
-Infura) for faster, more reliable chain scans. Without it the server rotates
-through a few public RPCs, which can be slow or rate-limited during the
-initial history backfill.
+Infura) for more reliable chain reads. Without it the server rotates through
+a few public RPCs.
+
+Set `ETHERSCAN_API_KEY` to a free [Etherscan API key](https://etherscan.io/myapikey)
+for a fast full-history import (approvals + token activity). Free RPC tiers
+cap `eth_getLogs` at ~10 blocks per request, which makes a pure-RPC history
+scan infeasible — with the key, history imports in dozens of calls instead of
+millions. Without it the server falls back to the slow RPC log scan.
 
 ## Brand assets
 
