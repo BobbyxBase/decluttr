@@ -746,6 +746,35 @@ async function backfillApprovals(ctx: Ctx, owner: string): Promise<void> {
   await db.update(schema.scanState).set({ approvalBackfillCursor: Math.max(0, page.from - 1), updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
 }
 
+async function backfillActivity(ctx: Ctx, owner: string): Promise<void> {
+  const db = ctx.db;
+  const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
+  if (!state || state.activityBackfillCursor <= 0) return;
+  const ownerTopic = padAddress(owner);
+  const outgoing = await queryLogsBackward({ topics: [TRANSFER_TOPIC, ownerTopic] }, state.activityBackfillCursor);
+  const incoming = await queryLogsBackward({ topics: [TRANSFER_TOPIC, null, ownerTopic] }, state.activityBackfillCursor);
+  for (const log of [...outgoing.logs, ...incoming.logs]) await recordTransfer(ctx, owner, log, false);
+  const nextCursor = Math.max(0, Math.min(outgoing.from, incoming.from) - 1);
+  await db.update(schema.scanState).set({ activityBackfillCursor: nextCursor, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
+}
+
+// Advances both the approval and the token-activity history backfills,
+// time-boxed so a fresh wallet's history indexes over a handful of calls.
+async function backfillHistory(ctx: Ctx, owner: string, maxPages: number, timeBudgetMs: number): Promise<void> {
+  const db = ctx.db;
+  const startedAt = Date.now();
+  for (let page = 0; page < maxPages; page += 1) {
+    const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
+    if (!state) break;
+    const approvalsDone = state.approvalBackfillCursor <= 0;
+    const activityDone = state.activityBackfillCursor <= 0;
+    if (approvalsDone && activityDone) break;
+    if (!approvalsDone) await backfillApprovals(ctx, owner);
+    if (!activityDone) await backfillActivity(ctx, owner);
+    if (Date.now() - startedAt > timeBudgetMs) break;
+  }
+}
+
 const settingsResponse = z.object({ approval_threshold_usd: z.number(), outflow_threshold_usd: z.number(), watch_enabled: z.boolean() });
 const alertItem = z.object({ id: z.number(), kind: z.enum(["approval", "outflow"]), wallet_address: z.string(), title: z.string(), detail: z.string(), usd_value: z.number().nullable(), tx_hash: z.string(), created_at: z.string(), read: z.boolean() });
 const tokenItem = z.object({ address: z.string(), name: z.string(), symbol: z.string(), balance: z.string(), usd_value: z.number().nullable(), price_usd: z.number().nullable(), hidden: z.boolean(), dust: z.boolean(), suspected_spam: z.boolean(), spam_reason: z.string().nullable() });
@@ -865,6 +894,8 @@ export const Actions = {
       // backfills run from the approvals/watch actions; making them prerequisites
       // for the overview caused the host bridge to time out on mobile.
       const result = await Promise.all(wallets.map(async (wallet): Promise<z.infer<typeof walletItem>> => {
+        // Discover tokens from older history too (best-effort, time-boxed).
+        try { await backfillHistory(ctx, wallet.address, 3, 8_000); } catch { /* discovery continues next load */ }
         const [state, activities, approvals] = await Promise.all([
           db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1).then((rows) => rows[0]),
           db.select().from(schema.tokenActivity).where(eq(schema.tokenActivity.walletAddress, wallet.address)),
@@ -876,7 +907,7 @@ export const Actions = {
         catch (balanceError) { error = balanceError instanceof Error ? balanceError.message : "Balance unavailable"; }
         const ethPrice = knownPrices.get("0x4200000000000000000000000000000000000006")?.usd ?? null;
         const ethUsd = ethPrice === null ? null : unitsNumber(ethBalance, 18) * ethPrice;
-        const addresses = Array.from(new Set([...Object.keys(CURATED), ...activities.map((row) => row.tokenAddress), ...approvals.map((row) => row.tokenAddress)])).slice(0, 24);
+        const addresses = Array.from(new Set([...Object.keys(CURATED), ...activities.map((row) => row.tokenAddress), ...approvals.map((row) => row.tokenAddress)])).slice(0, 100);
         const activityByToken = new Map(activities.map((row) => [row.tokenAddress, row]));
         const tokenResults = await Promise.all(addresses.map(async (address, index): Promise<z.infer<typeof tokenItem> | null> => {
           try {
@@ -996,29 +1027,21 @@ export const Actions = {
 
   listApprovals: defineAction({
     request: z.object({ refresh: z.boolean().default(true) }),
-    response: z.object({ approvals: z.array(z.object({ id: z.number(), wallet_address: z.string(), token_address: z.string(), token_symbol: z.string(), spender_address: z.string(), allowance_raw: z.string(), allowance_display: z.string(), usd_value: z.number().nullable(), unlimited: z.boolean(), last_seen_block: z.number() })), coverage: z.array(z.object({ wallet_address: z.string(), backfill_cursor: z.number(), latest_scanned_block: z.number(), complete: z.boolean(), error: z.string().nullable() })), as_of: z.string() }),
+    response: z.object({ approvals: z.array(z.object({ id: z.number(), wallet_address: z.string(), token_address: z.string(), token_symbol: z.string(), spender_address: z.string(), allowance_raw: z.string(), allowance_display: z.string(), usd_value: z.number().nullable(), unlimited: z.boolean(), last_seen_block: z.number() })), coverage: z.array(z.object({ wallet_address: z.string(), backfill_cursor: z.number(), latest_scanned_block: z.number(), chain_tip: z.number(), complete: z.boolean(), error: z.string().nullable() })), as_of: z.string() }),
     async handler(ctx, args) {
       const db = ctx.db;
       const wallets = await db.select().from(schema.watchedWallets).orderBy(asc(schema.watchedWallets.id));
-      const coverage: { wallet_address: string; backfill_cursor: number; latest_scanned_block: number; complete: boolean; error: string | null }[] = [];
+      const tipBlock = await latestBlock().catch(() => 0);
+      const coverage: { wallet_address: string; backfill_cursor: number; latest_scanned_block: number; chain_tip: number; complete: boolean; error: string | null }[] = [];
       if (args.refresh) {
         for (const wallet of wallets) {
           let error: string | null = null;
           try {
             await scanForward(ctx, wallet.address);
-            // Advance the history backfill several pages per call (time-boxed)
-            // so a fresh wallet's full history indexes in a handful of visits
-            // instead of one 5k-block page per request.
-            const backfillStartedAt = Date.now();
-            for (let page = 0; page < 10; page += 1) {
-              const cursorRow = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1))[0];
-              if (!cursorRow || cursorRow.approvalBackfillCursor <= 0) break;
-              await backfillApprovals(ctx, wallet.address);
-              if (Date.now() - backfillStartedAt > 20_000) break;
-            }
+            await backfillHistory(ctx, wallet.address, 10, 20_000);
           } catch (scanError) { error = scanError instanceof Error ? scanError.message : "Scan unavailable"; }
           const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1))[0];
-          coverage.push({ wallet_address: wallet.address, backfill_cursor: state?.approvalBackfillCursor ?? 0, latest_scanned_block: state?.latestScannedBlock ?? 0, complete: (state?.approvalBackfillCursor ?? 1) === 0, error });
+          coverage.push({ wallet_address: wallet.address, backfill_cursor: state?.approvalBackfillCursor ?? 0, latest_scanned_block: state?.latestScannedBlock ?? 0, chain_tip: tipBlock, complete: (state?.approvalBackfillCursor ?? 1) === 0, error });
         }
       }
       const prices = await fetchCuratedPrices().catch(() => new Map<string, { usd: number; asOf: Date }>());
