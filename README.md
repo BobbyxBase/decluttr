@@ -42,6 +42,11 @@ Then `bun run dev` serves the built bundle (or run with `NODE_ENV=production`).
 
 Set `PORT` to change the listen port (default 3000).
 
+Set `BASE_RPC_URL` to your own Base JSON-RPC HTTPS endpoint (e.g. Alchemy or
+Infura) for faster, more reliable chain scans. Without it the server rotates
+through a few public RPCs, which can be slow or rate-limited during the
+initial history backfill.
+
 ## Project layout
 
 ```
