@@ -764,7 +764,16 @@ async function probeUrlRange(url: string, width: number, tip: number): Promise<s
         params: [{ topics: [APPROVAL_TOPIC, deadTopic], fromBlock: hexBlock(from), toBlock: hexBlock(tip) }] }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) return `HTTP ${response.status}`;
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      try {
+        const payload = JSON.parse(text) as { error?: { message?: string } };
+        if (payload.error?.message) return `HTTP ${response.status}: ${payload.error.message}`;
+      } catch {
+        /* fall through to the plain status */
+      }
+      return `HTTP ${response.status}`;
+    }
     const payload = await response.json() as { result?: unknown; error?: { message?: string } };
     if (payload.error || payload.result === undefined) return payload.error?.message ?? "Malformed RPC response";
     return null;
