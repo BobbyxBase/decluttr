@@ -51,6 +51,24 @@ Infura) for faster, more reliable chain scans. Without it the server rotates
 through a few public RPCs, which can be slow or rate-limited during the
 initial history backfill.
 
+## Brand assets
+
+The logo and icon files are binary, so they ship separately from git. To add
+them:
+
+1. Get the files from the maintainer:
+   - `brand/decluttr-lockup.webp` — the repo header / social lockup
+   - `client/public/icon-512.png`, `client/public/icon-192.png`,
+     `client/public/apple-touch-icon.png`, `client/public/favicon-32x32.png`
+2. Drop the lockup into `brand/` and the four PNGs into `client/public/`
+   (create the folders if they don't exist).
+3. Run `bun run build` — the build copies `client/public/` into the served
+   bundle automatically.
+
+`icon-192.png` appears in the app header; the favicons are wired up in
+`client/index.html`. Without the PNGs the app still runs, just without the
+branded icons.
+
 ## Project layout
 
 ```
