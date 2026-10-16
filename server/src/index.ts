@@ -59,7 +59,8 @@ app.get("*", async (c) => {
 });
 
 console.log(`[decluttr] listening on http://localhost:${PORT}`);
-console.log(`[decluttr] chain RPC: ${process.env.BASE_RPC_URL ? "custom (BASE_RPC_URL)" : "public rotation (set BASE_RPC_URL for faster scans)"}`);
+console.log(`[decluttr] chain RPC: ${process.env.BASE_RPC_URL ? "custom (BASE_RPC_URL)" : "public rotation (set BASE_RPC_URL for reliability)"}`);
+console.log(`[decluttr] history: ${process.env.ETHERSCAN_API_KEY ? "Etherscan API (fast import)" : "RPC log scan (set ETHERSCAN_API_KEY for a fast history import)"}`);
 
 // Background history indexing: keeps scanning wallet history even with no
 // client attached. Leave the server running and it finishes on its own.
