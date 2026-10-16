@@ -479,7 +479,7 @@ export function App() {
           </button>
           <div className="section-heading compact"><div><h2>Tokens</h2><p>{currentWallet.tokens.filter((token) => !token.hidden).length} visible</p></div></div>
           <div className="data-list">{currentWallet.tokens.filter((token) => !token.hidden).map((token) => <TokenRow key={token.address} token={token} wallet={currentWallet} />)}{!currentWallet.tokens.some((token) => !token.hidden) && <p className="list-empty">No ERC-20 balances found in indexed activity.</p>}</div>
-          <p className="coverage-note">Indexed to block {currentWallet.indexed_through_block.toLocaleString()}. History backfill cursor: {currentWallet.backfill_cursor.toLocaleString()}.</p>
+          <p className="coverage-note">{currentWallet.backfill_cursor > 0 ? "Token history still scanning — more tokens appear as earlier blocks are checked. " : "Full token history indexed. "}Indexed to block {currentWallet.indexed_through_block.toLocaleString()}.</p>
         </>}
       </section>}
 
@@ -520,8 +520,13 @@ export function App() {
         {(() => {
           const incomplete = approvals.data?.coverage.filter((item) => !item.complete) ?? [];
           if (!incomplete.length) return null;
+          const progress = incomplete.map((item) => {
+            const tip = item.chain_tip > 0 ? item.chain_tip : 1;
+            return Math.min(1, Math.max(0, (tip - item.backfill_cursor) / tip));
+          });
+          const pct = Math.round(Math.min(...progress) * 100);
           const cursor = Math.min(...incomplete.map((item) => item.backfill_cursor));
-          return <div className="source-warning"><StatusDot tone="warn" /><span>Scanning full approval history — currently at block {cursor.toLocaleString()}. Keep this tab open; new approvals appear as they're found.</span><button className="text-button" onClick={() => approvals.refetch()}>Scan now</button></div>;
+          return <div className="scan-banner"><div className="scan-banner-top"><StatusDot tone="warn" /><strong>Scanning approval history — {pct}%</strong><button className="text-button" onClick={() => approvals.refetch()}>Scan now</button></div><div className="scan-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}><div className="scan-bar-fill" style={{ width: `${pct}%` }} /></div><p className="scan-sub">Block {cursor.toLocaleString()} · keep this tab open, new approvals appear as they're found.</p></div>;
         })()}
         {approvals.error && <div className="source-warning"><StatusDot tone="warn" /><span>{String(approvals.error)}</span><button className="text-button" onClick={() => approvals.refetch()}>Retry</button></div>}
         <div className="approval-list">{approvals.data?.approvals.map((approval) => <div className={`approval-row ${approval.unlimited ? "unlimited" : ""}`} key={approval.id}>
