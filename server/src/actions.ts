@@ -912,7 +912,7 @@ async function importWalletHistory(ctx: Ctx, owner: string): Promise<boolean> {
   console.log(`[decluttr] importing history for ${owner} via Blockscout`);
 
   // 1. Approvals: only the wallet's own transactions can grant them.
-  const txs = await blockscoutAll(`/addresses/${owner}/transactions`, { limit: "50" });
+  const txs = await blockscoutAll(`/addresses/${owner}/transactions`, {});
   const ownHashes = txs
     .filter((t) => t.from?.hash?.toLowerCase() === lcOwner && t.status === "ok")
     .map((t) => t.hash as string);
@@ -930,7 +930,7 @@ async function importWalletHistory(ctx: Ctx, owner: string): Promise<boolean> {
   }
 
   // 2. Token activity: the full ERC-20 transfer list.
-  const transfers = await blockscoutAll(`/addresses/${owner}/token-transfers`, { limit: "50", type: "ERC-20" });
+  const transfers = await blockscoutAll(`/addresses/${owner}/token-transfers`, { type: "ERC-20" });
   for (const t of transfers) {
     const log: RpcLog = {
       blockNumber: hexBlock(Number(t.block_number)),
