@@ -225,7 +225,14 @@ export function App() {
     },
     refetchIntervalInBackground: true,
   });
-  const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api.listApprovals({ refresh: true }), enabled: tab === "approvals", staleTime: 30_000 });
+  const approvals = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api.listApprovals({ refresh: true }),
+    enabled: tab === "approvals",
+    staleTime: 30_000,
+    // Keep advancing the history backfill automatically while it is incomplete.
+    refetchInterval: (query) => query.state.data?.coverage.some((item) => !item.complete) ? 15_000 : false,
+  });
   const watchPoll = useQuery({ queryKey: ["watch-poll"], queryFn: () => api.pollWatch({}), enabled: overview.data?.settings.watch_enabled === true, refetchInterval: 60_000, refetchIntervalInBackground: false });
 
   useEffect(() => {
@@ -510,12 +517,20 @@ export function App() {
         <div className="key-note"><span className="shield">◇</span><p>DeCluttr never holds keys. Revoke opens a transaction in your connected wallet.</p></div>
         {walletMessage && <div className="source-warning"><StatusDot tone={walletMessage.includes("failed") ? "danger" : "warn"} /><span>{walletMessage}</span></div>}
         {approvals.isPending && <div className="loading-block">Scanning approval events…</div>}
+        {(() => {
+          const incomplete = approvals.data?.coverage.filter((item) => !item.complete) ?? [];
+          if (!incomplete.length) return null;
+          const cursor = Math.min(...incomplete.map((item) => item.backfill_cursor));
+          return <div className="source-warning"><StatusDot tone="warn" /><span>Scanning full approval history — currently at block {cursor.toLocaleString()}. Keep this tab open; new approvals appear as they're found.</span><button className="text-button" onClick={() => approvals.refetch()}>Scan now</button></div>;
+        })()}
         {approvals.error && <div className="source-warning"><StatusDot tone="warn" /><span>{String(approvals.error)}</span><button className="text-button" onClick={() => approvals.refetch()}>Retry</button></div>}
         <div className="approval-list">{approvals.data?.approvals.map((approval) => <div className={`approval-row ${approval.unlimited ? "unlimited" : ""}`} key={approval.id}>
           <div className="approval-top"><div className="token-badge">{approval.token_symbol.slice(0, 2).toUpperCase()}</div><div className="row-main"><div className="row-title"><strong>{approval.token_symbol}</strong>{approval.unlimited && <span className="tag danger">unlimited</span>}</div><div className="row-sub mono">{shortAddress(approval.wallet_address)} → {shortAddress(approval.spender_address)}</div></div><div className="row-end"><strong>{approval.unlimited ? "∞" : money(approval.usd_value)}</strong></div></div>
           <div className="approval-actions"><span>{approval.allowance_display}</span><button className="revoke-button" onClick={() => revokeApproval(approval)}>Revoke</button></div>
         </div>)}</div>
-        {approvals.data && !approvals.data.approvals.length && <EmptyState title="No active approvals found" body="The scan checks current allowance values and drops revoked pairs." />}
+        {approvals.data && !approvals.data.approvals.length && (approvals.data.coverage.some((item) => !item.complete)
+          ? <EmptyState title="Scan in progress" body="No approvals found yet — the history scan is still working backward through past blocks." />
+          : <EmptyState title="No active approvals found" body="The scan checks current allowance values and drops revoked pairs." />)}
         {approvals.data?.coverage.map((item) => <div className="coverage-card" key={item.wallet_address}><div><strong>{shortAddress(item.wallet_address)}</strong><span>{item.complete ? "Full history indexed" : `Backfilling before block ${item.backfill_cursor.toLocaleString()}`}</span></div><StatusDot tone={item.error ? "warn" : item.complete ? "ok" : "warn"} /></div>)}
       </section>}
 

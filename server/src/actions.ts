@@ -1004,7 +1004,19 @@ export const Actions = {
       if (args.refresh) {
         for (const wallet of wallets) {
           let error: string | null = null;
-          try { await scanForward(ctx, wallet.address); await backfillApprovals(ctx, wallet.address); } catch (scanError) { error = scanError instanceof Error ? scanError.message : "Scan unavailable"; }
+          try {
+            await scanForward(ctx, wallet.address);
+            // Advance the history backfill several pages per call (time-boxed)
+            // so a fresh wallet's full history indexes in a handful of visits
+            // instead of one 5k-block page per request.
+            const backfillStartedAt = Date.now();
+            for (let page = 0; page < 10; page += 1) {
+              const cursorRow = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1))[0];
+              if (!cursorRow || cursorRow.approvalBackfillCursor <= 0) break;
+              await backfillApprovals(ctx, wallet.address);
+              if (Date.now() - backfillStartedAt > 20_000) break;
+            }
+          } catch (scanError) { error = scanError instanceof Error ? scanError.message : "Scan unavailable"; }
           const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1))[0];
           coverage.push({ wallet_address: wallet.address, backfill_cursor: state?.approvalBackfillCursor ?? 0, latest_scanned_block: state?.latestScannedBlock ?? 0, complete: (state?.approvalBackfillCursor ?? 1) === 0, error });
         }
