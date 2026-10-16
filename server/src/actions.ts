@@ -745,8 +745,8 @@ async function scanForward(ctx: Ctx, owner: string): Promise<number> {
   return through;
 }
 
-const BACKFILL_FANOUT = 50; // concurrent chunk queries per approval pass
-const ACTIVITY_FANOUT = 25; // concurrent chunk queries per activity filter (x2 filters)
+const BACKFILL_FANOUT = 12; // concurrent chunk queries per approval pass (gentle on free-tier rate limits)
+const ACTIVITY_FANOUT = 6; // concurrent chunk queries per activity filter (x2 filters)
 const BACKFILL_WALLET_BUDGET_MS = 10 * 60_000; // safety valve per pass; the next kick resumes
 
 // Probe the RPC's eth_getLogs range limit once per server run, so the fanout
