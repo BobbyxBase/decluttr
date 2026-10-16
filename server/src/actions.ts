@@ -894,7 +894,10 @@ async function blockscoutAll(path: string, params: Record<string, string>): Prom
     all.push(...items);
     const next = data.next_page_params;
     if (!next || items.length === 0) break;
-    pageParams = { ...params, block_number: String(next.block_number), index: String(next.index), items_count: String(next.items_count) };
+    pageParams = { ...params };
+    for (const key of ["block_number", "index", "items_count"]) {
+      if (next[key] !== null && next[key] !== undefined) pageParams[key] = String(next[key]);
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return all;
