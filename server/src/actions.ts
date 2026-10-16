@@ -5,9 +5,14 @@ type Ctx = ActionCtx;
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
+// Public Base RPCs rotate on failure. base.publicnode.com now requires an API
+// key and mainnet.base.org rate-limits aggressively, so the working public
+// endpoints come first. Set BASE_RPC_URL (e.g. an Alchemy/Infura HTTPS URL) to
+// use a private endpoint with priority.
 const RPC_URLS = [
-  "https://base.publicnode.com",
+  ...(process.env.BASE_RPC_URL ? [process.env.BASE_RPC_URL] : []),
   "https://base-mainnet.public.blastapi.io",
+  "https://base.meowrpc.com",
   "https://mainnet.base.org",
 ] as const;
 const COINGECKO = "https://api.coingecko.com/api/v3";
@@ -567,7 +572,9 @@ async function queryLogsForward(filter: Record<string, unknown>, from: number, l
 }
 
 async function queryLogsBackward(filter: Record<string, unknown>, cursor: number): Promise<LogPage> {
-  let width = Math.min(5_000, cursor + 1);
+  // 2000 is Alchemy's documented eth_getLogs range ceiling; the loop shrinks
+  // further on stricter endpoints (some public RPCs allow as few as 10).
+  let width = Math.min(2_000, cursor + 1);
   while (width >= 10) {
     const from = Math.max(0, cursor - width + 1);
     try {
@@ -740,10 +747,21 @@ async function scanForward(ctx: Ctx, owner: string): Promise<number> {
 async function backfillApprovals(ctx: Ctx, owner: string): Promise<void> {
   const db = ctx.db;
   const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
-  if (!state || state.approvalBackfillCursor <= 0) return;
+  if (!state) return;
+  // An Approval event from this owner requires one of their transactions, so
+  // no approval can exist before their first outgoing transaction. That block
+  // is an exact floor for the backfill (resolved once, then cached).
+  let floor = state.approvalBackfillFloor;
+  if (floor === null || floor === undefined) {
+    const tip = await latestBlock().catch(() => state.approvalBackfillCursor);
+    floor = await firstTransactionBlock(owner, tip, 0).catch(() => null) ?? 0;
+    await db.update(schema.scanState).set({ approvalBackfillFloor: floor, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
+  }
+  if (state.approvalBackfillCursor <= floor) return;
   const page = await queryLogsBackward({ topics: [APPROVAL_TOPIC, padAddress(owner)] }, state.approvalBackfillCursor);
   for (const log of page.logs) await recordApproval(ctx, owner, log, false);
-  await db.update(schema.scanState).set({ approvalBackfillCursor: Math.max(0, page.from - 1), updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
+  const nextCursor = Math.max(floor, page.from - 1);
+  await db.update(schema.scanState).set({ approvalBackfillCursor: nextCursor, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
 }
 
 async function backfillActivity(ctx: Ctx, owner: string): Promise<void> {
@@ -766,7 +784,7 @@ async function backfillHistory(ctx: Ctx, owner: string, maxPages: number, timeBu
   for (let page = 0; page < maxPages; page += 1) {
     const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
     if (!state) break;
-    const approvalsDone = state.approvalBackfillCursor <= 0;
+    const approvalsDone = state.approvalBackfillCursor <= (state.approvalBackfillFloor ?? 0);
     const activityDone = state.activityBackfillCursor <= 0;
     if (approvalsDone && activityDone) break;
     if (!approvalsDone) await backfillApprovals(ctx, owner);
@@ -1027,12 +1045,12 @@ export const Actions = {
 
   listApprovals: defineAction({
     request: z.object({ refresh: z.boolean().default(true) }),
-    response: z.object({ approvals: z.array(z.object({ id: z.number(), wallet_address: z.string(), token_address: z.string(), token_symbol: z.string(), spender_address: z.string(), allowance_raw: z.string(), allowance_display: z.string(), usd_value: z.number().nullable(), unlimited: z.boolean(), last_seen_block: z.number() })), coverage: z.array(z.object({ wallet_address: z.string(), backfill_cursor: z.number(), latest_scanned_block: z.number(), chain_tip: z.number(), complete: z.boolean(), error: z.string().nullable() })), as_of: z.string() }),
+    response: z.object({ approvals: z.array(z.object({ id: z.number(), wallet_address: z.string(), token_address: z.string(), token_symbol: z.string(), spender_address: z.string(), allowance_raw: z.string(), allowance_display: z.string(), usd_value: z.number().nullable(), unlimited: z.boolean(), last_seen_block: z.number() })), coverage: z.array(z.object({ wallet_address: z.string(), backfill_cursor: z.number(), backfill_floor: z.number(), latest_scanned_block: z.number(), chain_tip: z.number(), complete: z.boolean(), error: z.string().nullable() })), as_of: z.string() }),
     async handler(ctx, args) {
       const db = ctx.db;
       const wallets = await db.select().from(schema.watchedWallets).orderBy(asc(schema.watchedWallets.id));
       const tipBlock = await latestBlock().catch(() => 0);
-      const coverage: { wallet_address: string; backfill_cursor: number; latest_scanned_block: number; chain_tip: number; complete: boolean; error: string | null }[] = [];
+      const coverage: { wallet_address: string; backfill_cursor: number; backfill_floor: number; latest_scanned_block: number; chain_tip: number; complete: boolean; error: string | null }[] = [];
       if (args.refresh) {
         for (const wallet of wallets) {
           let error: string | null = null;
@@ -1041,7 +1059,8 @@ export const Actions = {
             await backfillHistory(ctx, wallet.address, 10, 20_000);
           } catch (scanError) { error = scanError instanceof Error ? scanError.message : "Scan unavailable"; }
           const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1))[0];
-          coverage.push({ wallet_address: wallet.address, backfill_cursor: state?.approvalBackfillCursor ?? 0, latest_scanned_block: state?.latestScannedBlock ?? 0, chain_tip: tipBlock, complete: (state?.approvalBackfillCursor ?? 1) === 0, error });
+          const floor = state?.approvalBackfillFloor ?? 0;
+          coverage.push({ wallet_address: wallet.address, backfill_cursor: state?.approvalBackfillCursor ?? 0, backfill_floor: floor, latest_scanned_block: state?.latestScannedBlock ?? 0, chain_tip: tipBlock, complete: (state?.approvalBackfillCursor ?? 1) <= floor, error });
         }
       }
       const prices = await fetchCuratedPrices().catch(() => new Map<string, { usd: number; asOf: Date }>());
