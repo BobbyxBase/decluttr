@@ -859,13 +859,98 @@ async function backfillActivityRange(ctx: Ctx, owner: string): Promise<boolean> 
 // Server-side backfill engine: indexes wallet history in the background so
 // scans keep running with no client attached. Concurrent triggers coalesce
 // into the single in-flight pass.
+// --- Etherscan history import ---
+//
+// Free RPC tiers cap eth_getLogs at ~10 blocks per request, which makes a
+// log-based history scan infeasible (millions of requests). The Etherscan V2
+// API instead returns a wallet's full transaction/transfer lists directly, so
+// history imports in dozens of calls. Needs a free ETHERSCAN_API_KEY; without
+// it the engine falls back to the slow RPC log scan.
+
+async function etherscanCall(action: string, address: string, page: number): Promise<any[]> {
+  const key = process.env.ETHERSCAN_API_KEY;
+  const url = `https://api.etherscan.io/v2/api?chainid=8453&module=account&action=${action}&address=${address}&startblock=0&endblock=99999999&page=${page}&offset=10000&sort=asc&apikey=${key}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`Etherscan HTTP ${res.status}`);
+  const data = await res.json() as { status: string; message: string; result: any };
+  if (data.status !== "1") {
+    if (typeof data.result === "string" && /no transactions found/i.test(data.result)) return [];
+    throw new Error(`Etherscan: ${data.message}${typeof data.result === "string" ? ` ${data.result}` : ""}`.trim());
+  }
+  return Array.isArray(data.result) ? data.result : [];
+}
+
+async function etherscanAll(action: string, address: string): Promise<any[]> {
+  const all: any[] = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const batch = await etherscanCall(action, address, page);
+    all.push(...batch);
+    if (batch.length < 10000) break;
+    await new Promise((resolve) => setTimeout(resolve, 300)); // stay under 5 calls/sec
+  }
+  return all;
+}
+
+// Imports a wallet's full history via Etherscan: approvals are extracted from
+// the receipts of the wallet's own transactions, token activity from the
+// transfer list. Runs once per wallet (cursors mark completion).
+async function importWalletHistory(ctx: Ctx, owner: string): Promise<void> {
+  const db = ctx.db;
+  const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
+  if (!state) return;
+  const floor = state.approvalBackfillFloor ?? 0;
+  if (state.approvalBackfillCursor <= floor && state.activityBackfillCursor <= 0) return; // already imported
+  const lcOwner = owner.toLowerCase();
+  console.log(`[decluttr] importing history for ${owner} via Etherscan`);
+
+  // 1. Approvals: only the wallet's own transactions can grant them.
+  const txs = await etherscanAll("txlist", owner);
+  const ownHashes = txs.filter((t) => t.from?.toLowerCase() === lcOwner && t.isError === "0").map((t) => t.hash as string);
+  const ownerTopic = padAddress(owner).toLowerCase();
+  for (let i = 0; i < ownHashes.length; i += 5) {
+    const batch = ownHashes.slice(i, i + 5);
+    const receipts = await Promise.all(batch.map((h) => rpc<{ logs: RpcLog[] } | null>("eth_getTransactionReceipt", [h]).catch(() => null)));
+    for (const receipt of receipts) {
+      for (const log of receipt?.logs ?? []) {
+        if (log.topics?.[0]?.toLowerCase() === APPROVAL_TOPIC && log.topics?.[1]?.toLowerCase() === ownerTopic) {
+          await recordApproval(ctx, owner, log, false);
+        }
+      }
+    }
+  }
+
+  // 2. Token activity: the full ERC-20 transfer list.
+  const transfers = await etherscanAll("tokentx", owner);
+  for (const t of transfers) {
+    const log: RpcLog = {
+      blockNumber: hexBlock(Number(t.blockNumber)),
+      transactionHash: t.hash,
+      logIndex: hexBlock(0),
+      address: String(t.contractAddress),
+      topics: [TRANSFER_TOPIC, padAddress(String(t.from)), padAddress(String(t.to))],
+      data: "0x" + (t.value ? BigInt(String(t.value)).toString(16) : "0"),
+    };
+    await recordTransfer(ctx, owner, log, false);
+  }
+
+  await db.update(schema.scanState).set({ approvalBackfillCursor: 0, activityBackfillCursor: 0, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
+  console.log(`[decluttr] history import complete for ${owner}: ${ownHashes.length} txs, ${transfers.length} transfers`);
+}
+
 let backfillInFlight: Promise<void> | null = null;
 
 export function kickBackfill(ctx: Ctx): void {
   if (backfillInFlight) return;
   backfillInFlight = (async () => {
     const wallets = await ctx.db.select().from(schema.watchedWallets).orderBy(asc(schema.watchedWallets.id));
+    const useEtherscan = !!process.env.ETHERSCAN_API_KEY;
     for (const wallet of wallets) {
+      if (useEtherscan) {
+        await importWalletHistory(ctx, wallet.address).catch((err) => {
+          console.error("[decluttr] history import failed", err instanceof Error ? err.message : err);
+        });
+        continue;
+      }
       const started = Date.now();
       for (;;) {
         const approvalsDone = await backfillApprovalsRange(ctx, wallet.address).catch(() => false);
