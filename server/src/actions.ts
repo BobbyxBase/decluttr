@@ -878,7 +878,10 @@ async function blockscoutGet(path: string, params: Record<string, string>): Prom
       "referer": "https://base.blockscout.com/",
     },
   });
-  if (!res.ok) throw new Error(`Blockscout HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = (await res.text().catch(() => "")).slice(0, 300);
+    throw new Error(`Blockscout HTTP ${res.status}: ${body}`);
+  }
   return res.json();
 }
 
