@@ -436,7 +436,7 @@ export function App() {
     {toast && <div className="toast" role="status"><StatusDot tone="warn" /><span>{toast}</span></div>}
     <main className="main-content">
       <header className="content-head">
-        <div><p className="eyeline">Base · 8453</p><h1>Declutter your wallets.</h1></div>
+        <div className="brand-row"><img src="./icon-192.png" className="brand-mark" alt="DeCluttr logo" width={44} height={44} /><div><p className="eyeline">Base · 8453</p><h1>Declutter your wallets.</h1></div></div>
         <button className="icon-button" onClick={() => { void overview.refetch(); if ((tab === "overview" || tab === "nfts") && nftWalletAddress) void nfts.refetch(); if (tab === "approvals") void approvals.refetch(); }} aria-label="Refresh live wallet data" disabled={overview.isFetching || nfts.isFetching}>
           <Glyph>{overview.isFetching ? "··" : "↻"}</Glyph>
         </button>
@@ -522,7 +522,8 @@ export function App() {
           if (!incomplete.length) return null;
           const progress = incomplete.map((item) => {
             const tip = item.chain_tip > 0 ? item.chain_tip : 1;
-            return Math.min(1, Math.max(0, (tip - item.backfill_cursor) / tip));
+            const range = Math.max(1, tip - item.backfill_floor);
+            return Math.min(1, Math.max(0, (tip - item.backfill_cursor) / range));
           });
           const pct = Math.round(Math.min(...progress) * 100);
           const cursor = Math.min(...incomplete.map((item) => item.backfill_cursor));
