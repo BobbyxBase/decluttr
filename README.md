@@ -50,11 +50,12 @@ Set `BASE_RPC_URL` to your own Base JSON-RPC HTTPS endpoint (e.g. Alchemy or
 Infura) for more reliable chain reads. Without it the server rotates through
 a few public RPCs.
 
-Set `ETHERSCAN_API_KEY` to a free [Etherscan API key](https://etherscan.io/myapikey)
-for a fast full-history import (approvals + token activity). Free RPC tiers
+Full-history import (approvals + token activity) runs through the free
+[Blockscout API](https://base.blockscout.com) — no key needed. Free RPC tiers
 cap `eth_getLogs` at ~10 blocks per request, which makes a pure-RPC history
-scan infeasible — with the key, history imports in dozens of calls instead of
-millions. Without it the server falls back to the slow RPC log scan.
+scan infeasible; the explorer import fetches a wallet's transaction and
+transfer lists directly instead (dozens of calls, not millions). If the
+explorer is unreachable the server falls back to the slow RPC log scan.
 
 ## Brand assets
 
