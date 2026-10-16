@@ -765,8 +765,8 @@ async function probeBackfillChunk(): Promise<number> {
       probedChunk = width;
       console.log(`[decluttr] backfill chunk size: ${width} blocks`);
       return width;
-    } catch {
-      /* try a narrower range */
+    } catch (probeError) {
+      console.log(`[decluttr] ${width}-block range rejected: ${probeError instanceof Error ? probeError.message : probeError}`);
     }
   }
   console.log("[decluttr] backfill chunk size: 10 blocks (chain tip unreachable, using minimum)");
