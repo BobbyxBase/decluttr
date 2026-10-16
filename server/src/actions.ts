@@ -571,22 +571,23 @@ async function queryLogsForward(filter: Record<string, unknown>, from: number, l
   return { logs, from, to };
 }
 
-async function queryLogsBackward(filter: Record<string, unknown>, cursor: number): Promise<LogPage> {
-  // 2000 is Alchemy's documented eth_getLogs range ceiling; the loop shrinks
-  // further on stricter endpoints (some public RPCs allow as few as 10).
-  let width = Math.min(2_000, cursor + 1);
-  while (width >= 10) {
-    const from = Math.max(0, cursor - width + 1);
+// eth_getLogs over an arbitrary range. Endpoints that reject wide ranges get
+// the range split in half recursively (after one retry with a pause, so a
+// transient rate-limit doesn't cause a split storm). Always covers [from, to]
+// fully — no gaps, no overlaps.
+async function getLogsFullRange(filter: Record<string, unknown>, from: number, to: number): Promise<RpcLog[]> {
+  if (from > to) return [];
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const logs = await rpc<RpcLog[]>("eth_getLogs", [{ ...filter, fromBlock: hexBlock(from), toBlock: hexBlock(cursor) }]);
-      return { logs, from, to: cursor };
+      return await rpc<RpcLog[]>("eth_getLogs", [{ ...filter, fromBlock: hexBlock(from), toBlock: hexBlock(to) }]);
     } catch {
-      width = Math.floor(width / 10);
+      await new Promise((resolve) => setTimeout(resolve, 1200));
     }
   }
-  const from = Math.max(0, cursor - 9);
-  const logs = await rpc<RpcLog[]>("eth_getLogs", [{ ...filter, fromBlock: hexBlock(from), toBlock: hexBlock(cursor) }]);
-  return { logs, from, to: cursor };
+  if (to - from < 20) throw new Error("Scan unavailable");
+  const mid = Math.floor((from + to) / 2);
+  const [a, b] = await Promise.all([getLogsFullRange(filter, from, mid), getLogsFullRange(filter, mid + 1, to)]);
+  return [...a, ...b];
 }
 
 async function ensureSettings(ctx: Ctx) {
@@ -744,53 +745,111 @@ async function scanForward(ctx: Ctx, owner: string): Promise<number> {
   return through;
 }
 
-async function backfillApprovals(ctx: Ctx, owner: string): Promise<void> {
+const BACKFILL_FANOUT = 50; // concurrent chunk queries per approval pass
+const ACTIVITY_FANOUT = 25; // concurrent chunk queries per activity filter (x2 filters)
+const BACKFILL_WALLET_BUDGET_MS = 10 * 60_000; // safety valve per pass; the next kick resumes
+
+// Probe the RPC's eth_getLogs range limit once per server run, so the fanout
+// matches what the endpoint actually allows instead of turning into a query
+// storm on throttled public RPCs.
+let probedChunk: number | null = null;
+async function probeBackfillChunk(): Promise<number> {
+  if (probedChunk !== null) return probedChunk;
+  const tip = await latestBlock().catch(() => 0);
+  const deadTopic = padAddress("0x0000000000000000000000000000000000000000");
+  for (const width of [2000, 500, 100, 10]) {
+    if (tip <= 0) break;
+    const from = Math.max(0, tip - width + 1);
+    try {
+      await rpc<RpcLog[]>("eth_getLogs", [{ topics: [APPROVAL_TOPIC, deadTopic], fromBlock: hexBlock(from), toBlock: hexBlock(tip) }]);
+      probedChunk = width;
+      console.log(`[decluttr] backfill chunk size: ${width} blocks`);
+      return width;
+    } catch {
+      /* try a narrower range */
+    }
+  }
+  console.log("[decluttr] backfill chunk size: 10 blocks (chain tip unreachable, using minimum)");
+  probedChunk = 10;
+  return 10;
+}
+
+// An Approval event from this owner requires one of their transactions, so no
+// approval can exist before their first outgoing transaction. That block is an
+// exact floor for the backfill (resolved once, then cached).
+async function getApprovalFloor(ctx: Ctx, owner: string, state: { approvalBackfillFloor: number | null; approvalBackfillCursor: number }): Promise<number> {
+  if (state.approvalBackfillFloor !== null && state.approvalBackfillFloor !== undefined) return state.approvalBackfillFloor;
+  const tip = await latestBlock().catch(() => state.approvalBackfillCursor);
+  const floor = await firstTransactionBlock(owner, tip, 0).catch(() => null) ?? 0;
+  await ctx.db.update(schema.scanState).set({ approvalBackfillFloor: floor, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
+  return floor;
+}
+
+// Indexes one span of approval history below the cursor, newest first.
+// Returns true when the approval history is fully indexed.
+async function backfillApprovalsRange(ctx: Ctx, owner: string): Promise<boolean> {
   const db = ctx.db;
   const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
-  if (!state) return;
-  // An Approval event from this owner requires one of their transactions, so
-  // no approval can exist before their first outgoing transaction. That block
-  // is an exact floor for the backfill (resolved once, then cached).
-  let floor = state.approvalBackfillFloor;
-  if (floor === null || floor === undefined) {
-    const tip = await latestBlock().catch(() => state.approvalBackfillCursor);
-    floor = await firstTransactionBlock(owner, tip, 0).catch(() => null) ?? 0;
-    await db.update(schema.scanState).set({ approvalBackfillFloor: floor, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
-  }
-  if (state.approvalBackfillCursor <= floor) return;
-  const page = await queryLogsBackward({ topics: [APPROVAL_TOPIC, padAddress(owner)] }, state.approvalBackfillCursor);
-  for (const log of page.logs) await recordApproval(ctx, owner, log, false);
-  const nextCursor = Math.max(floor, page.from - 1);
+  if (!state) return true;
+  const floor = await getApprovalFloor(ctx, owner, state);
+  if (state.approvalBackfillCursor <= floor) return true;
+  const to = state.approvalBackfillCursor;
+  const chunk = await probeBackfillChunk();
+  const from = Math.max(floor + 1, to - chunk * BACKFILL_FANOUT + 1);
+  const chunks: Array<[number, number]> = [];
+  for (let c = to; c >= from; c -= chunk) chunks.push([Math.max(from, c - chunk + 1), c]);
+  const results = await Promise.all(chunks.map(([cfrom, cto]) => getLogsFullRange({ topics: [APPROVAL_TOPIC, padAddress(owner)] }, cfrom, cto)));
+  for (const logs of results) for (const log of logs) await recordApproval(ctx, owner, log, false);
+  const nextCursor = from - 1;
   await db.update(schema.scanState).set({ approvalBackfillCursor: nextCursor, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
+  return nextCursor <= floor;
 }
 
-async function backfillActivity(ctx: Ctx, owner: string): Promise<void> {
+// Indexes one span of transfer history below the cursor, newest first.
+// Returns true when the activity history is fully indexed.
+async function backfillActivityRange(ctx: Ctx, owner: string): Promise<boolean> {
   const db = ctx.db;
   const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
-  if (!state || state.activityBackfillCursor <= 0) return;
+  if (!state || state.activityBackfillCursor <= 0) return true;
+  const to = state.activityBackfillCursor;
+  const chunk = await probeBackfillChunk();
+  const from = Math.max(1, to - chunk * ACTIVITY_FANOUT + 1);
   const ownerTopic = padAddress(owner);
-  const outgoing = await queryLogsBackward({ topics: [TRANSFER_TOPIC, ownerTopic] }, state.activityBackfillCursor);
-  const incoming = await queryLogsBackward({ topics: [TRANSFER_TOPIC, null, ownerTopic] }, state.activityBackfillCursor);
-  for (const log of [...outgoing.logs, ...incoming.logs]) await recordTransfer(ctx, owner, log, false);
-  const nextCursor = Math.max(0, Math.min(outgoing.from, incoming.from) - 1);
+  const chunks: Array<[number, number]> = [];
+  for (let c = to; c >= from; c -= chunk) chunks.push([Math.max(from, c - chunk + 1), c]);
+  const results = await Promise.all(chunks.flatMap(([cfrom, cto]) => [
+    getLogsFullRange({ topics: [TRANSFER_TOPIC, ownerTopic] }, cfrom, cto),
+    getLogsFullRange({ topics: [TRANSFER_TOPIC, null, ownerTopic] }, cfrom, cto),
+  ]));
+  for (const logs of results) for (const log of logs) await recordTransfer(ctx, owner, log, false);
+  const nextCursor = from - 1;
   await db.update(schema.scanState).set({ activityBackfillCursor: nextCursor, updatedAt: new Date() }).where(eq(schema.scanState.walletAddress, owner));
+  return nextCursor <= 0;
 }
 
-// Advances both the approval and the token-activity history backfills,
-// time-boxed so a fresh wallet's history indexes over a handful of calls.
-async function backfillHistory(ctx: Ctx, owner: string, maxPages: number, timeBudgetMs: number): Promise<void> {
-  const db = ctx.db;
-  const startedAt = Date.now();
-  for (let page = 0; page < maxPages; page += 1) {
-    const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, owner)).limit(1))[0];
-    if (!state) break;
-    const approvalsDone = state.approvalBackfillCursor <= (state.approvalBackfillFloor ?? 0);
-    const activityDone = state.activityBackfillCursor <= 0;
-    if (approvalsDone && activityDone) break;
-    if (!approvalsDone) await backfillApprovals(ctx, owner);
-    if (!activityDone) await backfillActivity(ctx, owner);
-    if (Date.now() - startedAt > timeBudgetMs) break;
-  }
+// Server-side backfill engine: indexes wallet history in the background so
+// scans keep running with no client attached. Concurrent triggers coalesce
+// into the single in-flight pass.
+let backfillInFlight: Promise<void> | null = null;
+
+export function kickBackfill(ctx: Ctx): void {
+  if (backfillInFlight) return;
+  backfillInFlight = (async () => {
+    const wallets = await ctx.db.select().from(schema.watchedWallets).orderBy(asc(schema.watchedWallets.id));
+    for (const wallet of wallets) {
+      const started = Date.now();
+      for (;;) {
+        const approvalsDone = await backfillApprovalsRange(ctx, wallet.address).catch(() => false);
+        const activityDone = await backfillActivityRange(ctx, wallet.address).catch(() => false);
+        if (approvalsDone && activityDone) break;
+        if (Date.now() - started > BACKFILL_WALLET_BUDGET_MS) break; // next kick resumes
+      }
+    }
+  })().catch((err) => {
+    console.error("[decluttr] backfill pass failed", err instanceof Error ? err.message : err);
+  }).finally(() => {
+    backfillInFlight = null;
+  });
 }
 
 const settingsResponse = z.object({ approval_threshold_usd: z.number(), outflow_threshold_usd: z.number(), watch_enabled: z.boolean() });
@@ -912,8 +971,9 @@ export const Actions = {
       // backfills run from the approvals/watch actions; making them prerequisites
       // for the overview caused the host bridge to time out on mobile.
       const result = await Promise.all(wallets.map(async (wallet): Promise<z.infer<typeof walletItem>> => {
-        // Discover tokens from older history too (best-effort, time-boxed).
-        try { await backfillHistory(ctx, wallet.address, 3, 8_000); } catch { /* discovery continues next load */ }
+        // History indexing runs server-side in the background; this just makes
+        // sure it's going and never blocks the response.
+        kickBackfill(ctx);
         const [state, activities, approvals] = await Promise.all([
           db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1).then((rows) => rows[0]),
           db.select().from(schema.tokenActivity).where(eq(schema.tokenActivity.walletAddress, wallet.address)),
@@ -1052,11 +1112,13 @@ export const Actions = {
       const tipBlock = await latestBlock().catch(() => 0);
       const coverage: { wallet_address: string; backfill_cursor: number; backfill_floor: number; latest_scanned_block: number; chain_tip: number; complete: boolean; error: string | null }[] = [];
       if (args.refresh) {
+        // History keeps indexing in the background; the response only waits
+        // for the cheap forward scan to the chain tip.
+        kickBackfill(ctx);
         for (const wallet of wallets) {
           let error: string | null = null;
           try {
             await scanForward(ctx, wallet.address);
-            await backfillHistory(ctx, wallet.address, 10, 20_000);
           } catch (scanError) { error = scanError instanceof Error ? scanError.message : "Scan unavailable"; }
           const state = (await db.select().from(schema.scanState).where(eq(schema.scanState.walletAddress, wallet.address)).limit(1))[0];
           const floor = state?.approvalBackfillFloor ?? 0;
