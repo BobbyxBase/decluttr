@@ -1,6 +1,10 @@
 # DeCluttr
 
+![DeCluttr](brand/decluttr-lockup.webp)
+
 Web3 wallet management on **Base** — a phone-first dashboard for watching wallets, auditing token approvals, cleaning up dust, browsing NFTs, and catching security-relevant changes.
+
+*Your wallet, minus the mess.*
 
 Built by Robert Collier.
 
