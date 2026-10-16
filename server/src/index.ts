@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { Actions } from "./actions";
+import { Actions, kickBackfill } from "./actions";
 import { createDiskBlobStore, type ActionCtx, type ActionDefinition } from "./ctx";
 import { openDatabase, runMigrations } from "./db";
 
@@ -59,4 +59,11 @@ app.get("*", async (c) => {
 });
 
 console.log(`[decluttr] listening on http://localhost:${PORT}`);
+console.log(`[decluttr] chain RPC: ${process.env.BASE_RPC_URL ? "custom (BASE_RPC_URL)" : "public rotation (set BASE_RPC_URL for faster scans)"}`);
+
+// Background history indexing: keeps scanning wallet history even with no
+// client attached. Leave the server running and it finishes on its own.
+kickBackfill(ctx);
+setInterval(() => kickBackfill(ctx), 30_000);
+
 export default { port: PORT, fetch: app.fetch };
