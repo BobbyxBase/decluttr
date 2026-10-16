@@ -749,27 +749,47 @@ const BACKFILL_FANOUT = 12; // concurrent chunk queries per approval pass (gentl
 const ACTIVITY_FANOUT = 6; // concurrent chunk queries per activity filter (x2 filters)
 const BACKFILL_WALLET_BUDGET_MS = 10 * 60_000; // safety valve per pass; the next kick resumes
 
-// Probe the RPC's eth_getLogs range limit once per server run, so the fanout
-// matches what the endpoint actually allows instead of turning into a query
-// storm on throttled public RPCs.
+// Probe the primary RPC's eth_getLogs range limit once per server run, so the
+// fanout matches what the endpoint actually allows instead of turning into a
+// query storm on throttled public RPCs. Tests the primary URL directly (not
+// through the rotation) so the log shows that endpoint's real answer.
+async function probeUrlRange(url: string, width: number, tip: number): Promise<string | null> {
+  const from = Math.max(0, tip - width + 1);
+  const deadTopic = padAddress("0x0000000000000000000000000000000000000000");
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getLogs",
+        params: [{ topics: [APPROVAL_TOPIC, deadTopic], fromBlock: hexBlock(from), toBlock: hexBlock(tip) }] }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return `HTTP ${response.status}`;
+    const payload = await response.json() as { result?: unknown; error?: { message?: string } };
+    if (payload.error || payload.result === undefined) return payload.error?.message ?? "Malformed RPC response";
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 let probedChunk: number | null = null;
 async function probeBackfillChunk(): Promise<number> {
   if (probedChunk !== null) return probedChunk;
   const tip = await latestBlock().catch(() => 0);
-  const deadTopic = padAddress("0x0000000000000000000000000000000000000000");
+  const primary = RPC_URLS[0];
+  const shortHost = primary.replace(/^https?:\/\//, "").split("/")[0];
   for (const width of [2000, 500, 100, 10]) {
     if (tip <= 0) break;
-    const from = Math.max(0, tip - width + 1);
-    try {
-      await rpc<RpcLog[]>("eth_getLogs", [{ topics: [APPROVAL_TOPIC, deadTopic], fromBlock: hexBlock(from), toBlock: hexBlock(tip) }]);
+    const err = await probeUrlRange(primary, width, tip);
+    if (err === null) {
       probedChunk = width;
-      console.log(`[decluttr] backfill chunk size: ${width} blocks`);
+      console.log(`[decluttr] backfill chunk size: ${width} blocks (${shortHost})`);
       return width;
-    } catch (probeError) {
-      console.log(`[decluttr] ${width}-block range rejected: ${probeError instanceof Error ? probeError.message : probeError}`);
     }
+    console.log(`[decluttr] ${shortHost}: ${width}-block range rejected: ${err}`);
   }
-  console.log("[decluttr] backfill chunk size: 10 blocks (chain tip unreachable, using minimum)");
+  console.log(`[decluttr] backfill chunk size: 10 blocks (${shortHost}, using minimum)`);
   probedChunk = 10;
   return 10;
 }
