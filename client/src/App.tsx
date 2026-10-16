@@ -525,9 +525,10 @@ export function App() {
             const range = Math.max(1, tip - item.backfill_floor);
             return Math.min(1, Math.max(0, (tip - item.backfill_cursor) / range));
           });
+          const tipKnown = incomplete.every((item) => item.chain_tip > 0);
           const pct = Math.round(Math.min(...progress) * 100);
           const cursor = Math.min(...incomplete.map((item) => item.backfill_cursor));
-          return <div className="scan-banner"><div className="scan-banner-top"><StatusDot tone="warn" /><strong>Scanning approval history — {pct}%</strong><button className="text-button" onClick={() => approvals.refetch()}>Scan now</button></div><div className="scan-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}><div className="scan-bar-fill" style={{ width: `${pct}%` }} /></div><p className="scan-sub">Block {cursor.toLocaleString()} · keep this tab open, new approvals appear as they're found.</p></div>;
+          return <div className="scan-banner"><div className="scan-banner-top"><StatusDot tone="warn" /><strong>Scanning approval history — {tipKnown ? `${pct}%` : "…"}</strong><button className="text-button" onClick={() => approvals.refetch()}>Scan now</button></div><div className="scan-bar" role="progressbar" aria-valuenow={tipKnown ? pct : undefined} aria-valuemin={0} aria-valuemax={100}><div className="scan-bar-fill" style={{ width: `${tipKnown ? pct : 100}%`, opacity: tipKnown ? 1 : .45 }} /></div><p className="scan-sub">Block {cursor.toLocaleString()} · runs on your computer in the background — leave the DeCluttr server running and it'll finish on its own.</p></div>;
         })()}
         {approvals.error && <div className="source-warning"><StatusDot tone="warn" /><span>{String(approvals.error)}</span><button className="text-button" onClick={() => approvals.refetch()}>Retry</button></div>}
         <div className="approval-list">{approvals.data?.approvals.map((approval) => <div className={`approval-row ${approval.unlimited ? "unlimited" : ""}`} key={approval.id}>
